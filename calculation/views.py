@@ -1,5 +1,5 @@
 import json
-import random
+import os
 import time
 import threading
 from django.http import JsonResponse
@@ -8,38 +8,87 @@ from django.views.decorators.http import require_http_methods
 import requests
 
 
-# Константа для токена авторизации (8 байт)
 AUTH_TOKEN = "secret123"  # 8 байт токен для псевдо-авторизации
 
-# URL основного Go сервиса
-MAIN_SERVICE_URL = "http://localhost:8080/api/v1"
+
+USE_HTTPS = os.getenv("USE_HTTPS", "false").lower() == "true"
+PROTOCOL = "https" if USE_HTTPS else "http"
+MAIN_SERVICE_URL = f"{PROTOCOL}://localhost:8080/api/v1"
+
+
+def calculate_unit_cost(material):
+   
+    base_price = 100.0  # Базовая цена
+    
+    if material.get('density') is not None:
+        base_price += material['density'] * 0.1
+    
+    if material.get('thickness') is not None:
+        base_price += material['thickness'] * 2.0
+    
+    return base_price
 
 
 def calculate_total_cost(calculation_id):
-    """
-    Выполняет расчет total_cost с задержкой 5-10 секунд.
-    Генерирует случайный результат (успех/неуспех).
-    """
-    # Задержка от 5 до 10 секунд
-    delay = random.uniform(5, 10)
+    
+    delay = 5.0  # Фиксированная задержка 5 секунд для стабильности
     time.sleep(delay)
     
-    # Генерируем случайный результат (успех/неуспех)
-    # В случае успеха - случайная стоимость от 1000 до 10000
-    # В случае неуспеха - 0 или отрицательное значение
-    is_success = random.choice([True, False])
-    
-    if is_success:
-        total_cost = random.uniform(1000.0, 10000.0)
-    else:
+    try:
+        # Получаем данные расчета из Go API
+        get_url = f"{MAIN_SERVICE_URL}/calculations/{calculation_id}"
+        # Отключаем проверку SSL для HTTPS в разработке (самоподписанные сертификаты)
+        # В production должно быть verify=True
+        request_kwargs = {"timeout": 30}
+        if USE_HTTPS:
+            request_kwargs["verify"] = False  # Для разработки с самоподписанными сертификатами
+        response = requests.get(get_url, **request_kwargs)
+        
+        if response.status_code != 200:
+            print(f"Failed to get calculation {calculation_id}: {response.status_code} - {response.text}")
+            # В случае ошибки отправляем 0
+            total_cost = 0.0
+            status = "failed"
+        else:
+            calculation_data = response.json()
+            material_calculations = calculation_data.get('material_calculations', [])
+            
+            # Рассчитываем общую стоимость
+            total_cost = 0.0
+            
+            for mc in material_calculations:
+                material = mc.get('material', {})
+                quantity = mc.get('quantity', 1)
+                
+                # Рассчитываем стоимость единицы материала
+                unit_cost = calculate_unit_cost(material)
+                
+                # Рассчитываем стоимость для данного материала (unit_cost * quantity)
+                material_total_cost = unit_cost * quantity
+                
+                # Добавляем к общей стоимости
+                total_cost += material_total_cost
+                
+                print(f"Material {material.get('name', 'Unknown')}: unit_cost={unit_cost:.2f}, quantity={quantity}, total={material_total_cost:.2f}")
+            
+            print(f"Total cost for calculation {calculation_id}: {total_cost:.2f}")
+            status = "success" if total_cost > 0 else "failed"
+        
+    except requests.exceptions.RequestException as e:
+        print(f"Error getting calculation data for {calculation_id}: {str(e)}")
         total_cost = 0.0
+        status = "failed"
+    except Exception as e:
+        print(f"Unexpected error calculating cost for {calculation_id}: {str(e)}")
+        total_cost = 0.0
+        status = "failed"
     
     # Отправляем PUT запрос к основному сервису
     update_url = f"{MAIN_SERVICE_URL}/calculations/{calculation_id}/update-result"
     
     payload = {
         "total_cost": total_cost,
-        "status": "success" if is_success else "failed"
+        "status": status
     }
     
     headers = {
@@ -48,9 +97,13 @@ def calculate_total_cost(calculation_id):
     }
     
     try:
-        response = requests.put(update_url, json=payload, headers=headers, timeout=30)
+        # Отключаем проверку SSL для HTTPS в разработке
+        request_kwargs = {"json": payload, "headers": headers, "timeout": 30}
+        if USE_HTTPS:
+            request_kwargs["verify"] = False  # Для разработки с самоподписанными сертификатами
+        response = requests.put(update_url, **request_kwargs)
         if response.status_code == 200:
-            print(f"Successfully updated calculation {calculation_id} with total_cost={total_cost}")
+            print(f"Successfully updated calculation {calculation_id} with total_cost={total_cost:.2f}")
         else:
             print(f"Failed to update calculation {calculation_id}: {response.status_code} - {response.text}")
     except Exception as e:
